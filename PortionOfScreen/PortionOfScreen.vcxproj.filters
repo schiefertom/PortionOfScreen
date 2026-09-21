@@ -42,6 +42,11 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
+    <Manifest Include="PortionOfScreen.manifest">
+      <Filter>Resource Files</Filter>
+    </Manifest>
+  </ItemGroup>
+  <ItemGroup>
     <Image Include="PortionOfScreen.ico">
       <Filter>Resource Files</Filter>
     </Image>

@@ -1,19 +1,42 @@
 // PortionOfScreen.cpp : Defines the entry point for the application.
 //
+// Terms (Share Region, Window, Size Preset, Free, Locked, Title Bar) are defined in ../CONTEXT.md.
 
 #include "framework.h"
 #include "PortionOfScreen.h"
 #include "WinReg.hpp"
-
-// Auto remove PoS caption by setting the WS_POPUP style in focused mode after one minute.
-// However, WS_POPUP windows can't be shared, so you have to share within one minute after de-activating PoS.
-//#define AUTO_REMOVE_CAPTION
+#include <cstdio>
 
 #define MAX_LOADSTRING 100
 #define IDT_REDRAW     101
-#define IDC_OPTIONS    1100
 #define POS_MIN_WIDTH  320
 #define POS_MIN_HEIGHT 200
+#define POS_MAX_SIZE   16384
+
+// System menu command IDs. The four low-order bits of a WM_SYSCOMMAND wParam are used by the
+// system, so application IDs keep them zero and the handler masks wParam with 0xFFF0.
+#define IDC_OPTIONS       0x1000
+#define IDC_HIDE_CAPTION  0x1010
+#define IDC_SIZE_FIRST    0x1100   // Free; preset n is IDC_SIZE_FIRST + n * IDC_SIZE_STEP
+#define IDC_SIZE_STEP     0x10
+
+// Window styles with and without the Title Bar.
+#define WINDOW_STYLE_CAPTION     (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX)
+#define WINDOW_STYLE_NO_CAPTION  (WS_POPUP)
+
+// Size Presets: the Share Region in physical pixels. Index 0 is Free, the last index is Custom.
+struct SizePreset { int width; int height; const wchar_t* label; };
+const SizePreset SIZE_PRESETS[] = {
+    { 1280,  720, L"1280 × 720" },
+    { 1600,  900, L"1600 × 900" },
+    { 1920, 1080, L"1920 × 1080" },
+    { 1920, 1200, L"1920 × 1200" },
+    { 2560, 1440, L"2560 × 1440" },
+};
+const int SIZE_PRESET_COUNT = sizeof(SIZE_PRESETS) / sizeof(SIZE_PRESETS[0]);
+const int SIZE_FREE = 0;
+const int SIZE_CUSTOM = SIZE_PRESET_COUNT + 1;
+#define IDC_SIZE_CUSTOM   (IDC_SIZE_FIRST + SIZE_CUSTOM * IDC_SIZE_STEP)
 
 // Global Variables:
 HINSTANCE hInst;                                // current instance
@@ -22,18 +45,32 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 bool moveToDefaultWindowPos = false;
 HWND newFocusHwnd;
 unsigned int focusTime;
+HMENU hSizeMenu;                                // "Size" submenu of the system menu
+int sizeMenuPosition;                           // its position in the system menu
+bool captionHidden = false;                     // Title Bar hidden via the system menu
 
 // Global settings
 bool focusMode =  false;
 RECT defaultWindowPos;
+int sizePreset = SIZE_FREE;                     // SIZE_FREE, 1..SIZE_PRESET_COUNT or SIZE_CUSTOM
+int customWidth = 1920;
+int customHeight = 1080;
 
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK    CustomSize(HWND, UINT, WPARAM, LPARAM);
 void                LoadSettings();
 void                SaveSettings();
+bool                GetPresetSize(int preset, int& width, int& height);
+RECT                GetShareRegion(HWND hWnd);
+void                SetShareRegion(HWND hWnd, RECT region);
+bool                ApplySizePreset(HWND hWnd, int preset);
+void                ShowCaption(HWND hWnd, bool show);
+void                UpdateTitle(HWND hWnd);
+void                UpdateSystemMenu(HWND hWnd);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -43,8 +80,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    // Prevent automatic scaling
-    SetProcessDPIAware();
+    // DPI awareness (Per-Monitor V2) is declared in PortionOfScreen.manifest, so that all
+    // coordinates in this program are physical pixels on every monitor.
 
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
@@ -113,11 +150,15 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 
    LoadSettings();
 
+   // Create the window Free; the saved preset is applied below, once the window knows its monitor.
+   int startupPreset = sizePreset;
+   sizePreset = SIZE_FREE;
+
    HWND hWnd = CreateWindowExW(
        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT,
        szWindowClass,
        szTitle,
-       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX,
+       WINDOW_STYLE_CAPTION,
        defaultWindowPos.left,
        defaultWindowPos.top,
        defaultWindowPos.right - defaultWindowPos.left,
@@ -132,13 +173,27 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
       return FALSE;
    }
 
+   hSizeMenu = CreatePopupMenu();
+   AppendMenu(hSizeMenu, MF_STRING, IDC_SIZE_FIRST, L"Free");
+   for (int i = 0; i < SIZE_PRESET_COUNT; ++i)
+       AppendMenu(hSizeMenu, MF_STRING, IDC_SIZE_FIRST + (i + 1) * IDC_SIZE_STEP, SIZE_PRESETS[i].label);
+   AppendMenu(hSizeMenu, MF_STRING, IDC_SIZE_CUSTOM, L"Custom...");
+
    HMENU hSysMenu = GetSystemMenu(hWnd, FALSE);
    AppendMenu(hSysMenu, MF_SEPARATOR, 0, NULL);
+   sizeMenuPosition = GetMenuItemCount(hSysMenu);
+   AppendMenu(hSysMenu, MF_POPUP, (UINT_PTR) hSizeMenu, L"Size");
+   AppendMenu(hSysMenu, MF_STRING, IDC_HIDE_CAPTION, L"Hide title bar");
    AppendMenu(hSysMenu, MF_STRING, IDC_OPTIONS, L"Options");
 
    ShowWindow(hWnd, nCmdShow);
    SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), 128, LWA_ALPHA);
    UpdateWindow(hWnd);
+
+   if (!focusMode)
+       ApplySizePreset(hWnd, startupPreset);   // stays Free, with a message, if it does not fit
+   else
+       sizePreset = startupPreset;             // kept for when the user returns to Fixed Mode
 
    SetTimer(hWnd, IDT_REDRAW, 200, (TIMERPROC)NULL);
 
@@ -154,14 +209,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
-#ifdef AUTO_REMOVE_CAPTION
-    case WM_NCACTIVATE:
     case WM_ACTIVATE:
-    case WM_ACTIVATEAPP:
-        // Restore PoS caption
-        SetWindowLong(hWnd, GWL_STYLE, WS_VISIBLE | WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX);
+        // The Title Bar returns whenever the Window is activated (taskbar, Alt+Tab).
+        if (captionHidden && LOWORD(wParam) != WA_INACTIVE)
+            ShowCaption(hWnd, true);
         return DefWindowProc(hWnd, message, wParam, lParam);
-#endif
 
     case WM_LBUTTONUP:
         SetWindowPos(hWnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
@@ -177,6 +229,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             SetWindowPos(hWnd, HWND_TOPMOST, defaultWindowPos.left, defaultWindowPos.top, defaultWindowPos.right - defaultWindowPos.left, defaultWindowPos.bottom - defaultWindowPos.top, 0);
             moveToDefaultWindowPos = false;
+            // Back in Fixed Mode: re-apply the preset, which Focus Mode ignored.
+            ApplySizePreset(hWnd, sizePreset);
         }
 
         SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), 128, LWA_ALPHA);
@@ -193,15 +247,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         LRESULT result = DefWindowProc(hWnd, message, wParam, lParam);
 
-        if (GetForegroundWindow() == hWnd)
+        // While the Title Bar is hidden the window rect equals the Share Region; do not remember
+        // it as the default position, which is always a rect with the Title Bar.
+        if (GetForegroundWindow() == hWnd && !captionHidden)
         {
             int prevBottom = defaultWindowPos.bottom;
             GetWindowRect(hWnd, &defaultWindowPos);
             if (focusMode) defaultWindowPos.bottom = prevBottom;
         }
 
+        if (message == WM_SIZE)
+            UpdateTitle(hWnd);
+
         return result;
     }
+
+    case WM_DPICHANGED:
+        // Keep the Share Region at its physical size; only the frame is recomputed for the new DPI.
+        SetShareRegion(hWnd, GetShareRegion(hWnd));
+        return 0;
+
+    case WM_INITMENUPOPUP:
+        UpdateSystemMenu(hWnd);
+        return DefWindowProc(hWnd, message, wParam, lParam);
 
     case WM_TIMER:
         switch (wParam)
@@ -212,7 +280,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 HWND hwndForeground = GetForegroundWindow();
                 if (hwndForeground != hWnd)
                 {
-                    // Add a slight delay between activating a window and moving the PoS window. 
+                    // Add a slight delay between activating a window and moving the PoS window.
                     // This makes changing the focused window smoother, less jumpy.
                     if (newFocusHwnd != hwndForeground)
                     {
@@ -224,12 +292,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
                     if (focusTime < 3)
                         break;
-
-#ifdef AUTO_REMOVE_CAPTION
-                    // Remove PoS caption after one minute. Can't do it earlier because you can't select WS_POPUP windows when sharing a window.
-                    if (focusTime > 300)
-                        SetWindowLong(hWnd, GWL_STYLE, WS_VISIBLE | WS_DISABLED | WS_POPUP);
-#endif
 
                     RECT rectForeground;
                     GetWindowRect(hwndForeground, &rectForeground);
@@ -246,7 +308,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     }
                 }
             }
-            
+
             InvalidateRect(hWnd, NULL, TRUE);
         }
         break;
@@ -259,14 +321,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rect;
-        GetWindowRect(hWnd, &rect);
+        GetClientRect(hWnd, &rect);
 
         HWND hwndDesktop = GetDesktopWindow();
         HDC hdcDesktop = GetWindowDC(hwndDesktop);
         POINT clientPoint = { 0, 0 };
         ClientToScreen(hWnd, &clientPoint);
 
-        BitBlt(hdc, 0, 0, rect.right - rect.left + 1, rect.bottom - rect.top + 1, hdcDesktop, clientPoint.x, clientPoint.y, SRCCOPY);
+        BitBlt(hdc, 0, 0, rect.right, rect.bottom, hdcDesktop, clientPoint.x, clientPoint.y, SRCCOPY);
 
         ReleaseDC(hwndDesktop, hdcDesktop);
         EndPaint(hWnd, &ps);
@@ -276,10 +338,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_GETMINMAXINFO:
     {
         MINMAXINFO* lpMMI = (MINMAXINFO*)lParam;
+        UINT dpi = GetDpiForWindow(hWnd);
+
+        int width, height;
+        if (!focusMode && GetPresetSize(sizePreset, width, height))
+        {
+            // Locked: the only allowed size is the one that gives the preset Share Region.
+            RECT outer = { 0, 0, width, height };
+            AdjustWindowRectExForDpi(&outer, captionHidden ? WINDOW_STYLE_NO_CAPTION : WINDOW_STYLE_CAPTION, FALSE, (DWORD) GetWindowLong(hWnd, GWL_EXSTYLE), dpi);
+            POINT size = { outer.right - outer.left, outer.bottom - outer.top };
+            lpMMI->ptMinTrackSize = size;
+            lpMMI->ptMaxTrackSize = size;
+            lpMMI->ptMaxSize = size;
+            break;
+        }
+
         lpMMI->ptMinTrackSize.x = POS_MIN_WIDTH;
         if (focusMode)
         {
-            lpMMI->ptMinTrackSize.y = GetSystemMetrics(SM_CYCAPTION);
+            lpMMI->ptMinTrackSize.y = GetSystemMetricsForDpi(SM_CYCAPTION, dpi);
             // Prevent vertical sizing if the PoS window has the focus
             if (hWnd == GetForegroundWindow())
                 lpMMI->ptMaxTrackSize.y = lpMMI->ptMinTrackSize.y;
@@ -295,18 +372,170 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_SYSCOMMAND:
-        if (wParam == IDC_OPTIONS)
+    {
+        UINT command = (UINT) (wParam & 0xFFF0);
+        if (command == IDC_OPTIONS)
         {
             DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
             break;
         }
-        // fall through
+        if (command == IDC_HIDE_CAPTION)
+        {
+            ShowCaption(hWnd, false);
+            break;
+        }
+        if (focusMode && command >= IDC_SIZE_FIRST && command <= IDC_SIZE_CUSTOM)
+            break;                              // presets do not apply in Focus Mode (menu is greyed)
+        if (command == IDC_SIZE_CUSTOM)
+        {
+            int prevWidth = customWidth, prevHeight = customHeight;
+            if (DialogBox(hInst, MAKEINTRESOURCE(IDD_CUSTOM_SIZE), hWnd, CustomSize) == IDOK)
+            {
+                if (!ApplySizePreset(hWnd, SIZE_CUSTOM))
+                {
+                    customWidth = prevWidth;
+                    customHeight = prevHeight;
+                }
+            }
+            break;
+        }
+        if (command >= IDC_SIZE_FIRST && command < IDC_SIZE_CUSTOM)
+        {
+            ApplySizePreset(hWnd, (command - IDC_SIZE_FIRST) / IDC_SIZE_STEP);
+            break;
+        }
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
 
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);
     }
 
     return 0;
+}
+
+// Width and height of a preset; false for Free.
+bool GetPresetSize(int preset, int& width, int& height)
+{
+    if (preset >= 1 && preset <= SIZE_PRESET_COUNT)
+    {
+        width = SIZE_PRESETS[preset - 1].width;
+        height = SIZE_PRESETS[preset - 1].height;
+        return true;
+    }
+    if (preset == SIZE_CUSTOM)
+    {
+        width = customWidth;
+        height = customHeight;
+        return true;
+    }
+    return false;
+}
+
+// The Share Region in screen coordinates (physical pixels).
+RECT GetShareRegion(HWND hWnd)
+{
+    RECT region;
+    GetClientRect(hWnd, &region);
+    MapWindowPoints(hWnd, nullptr, (LPPOINT) &region, 2);
+    return region;
+}
+
+// Moves and resizes the Window so that its Share Region matches the given screen rectangle.
+// If the Window would extend past the monitor it is pushed inwards, keeping the Title Bar
+// reachable at the top.
+void SetShareRegion(HWND hWnd, RECT region)
+{
+    RECT outer = region;
+    AdjustWindowRectExForDpi(&outer, captionHidden ? WINDOW_STYLE_NO_CAPTION : WINDOW_STYLE_CAPTION, FALSE, (DWORD) GetWindowLong(hWnd, GWL_EXSTYLE), GetDpiForWindow(hWnd));
+    int width = outer.right - outer.left;
+    int height = outer.bottom - outer.top;
+
+    MONITORINFO monitor = { sizeof(monitor) };
+    GetMonitorInfo(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST), &monitor);
+
+    int x = outer.left, y = outer.top;
+    if (x + width > monitor.rcMonitor.right) x = monitor.rcMonitor.right - width;
+    if (y + height > monitor.rcMonitor.bottom) y = monitor.rcMonitor.bottom - height;
+    if (x < monitor.rcMonitor.left) x = monitor.rcMonitor.left;
+    if (y < monitor.rcMonitor.top) y = monitor.rcMonitor.top;
+
+    SetWindowPos(hWnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+// Activates a preset (or Free). A Share Region larger than the monitor is refused with a message
+// and the previous preset stays active. If only the Title Bar does not fit, the preset is applied
+// and the user is told to hide the Title Bar once sharing runs.
+bool ApplySizePreset(HWND hWnd, int preset)
+{
+    int width, height;
+    if (!GetPresetSize(preset, width, height))
+    {
+        sizePreset = SIZE_FREE;
+        return true;
+    }
+
+    MONITORINFO monitor = { sizeof(monitor) };
+    GetMonitorInfo(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST), &monitor);
+    int monitorWidth = monitor.rcMonitor.right - monitor.rcMonitor.left;
+    int monitorHeight = monitor.rcMonitor.bottom - monitor.rcMonitor.top;
+
+    WCHAR text[512];
+    if (width > monitorWidth || height > monitorHeight)
+    {
+        swprintf_s(text, L"A %d × %d shared area does not fit on this monitor (%d × %d).\n\nChoose a smaller size.",
+            width, height, monitorWidth, monitorHeight);
+        MessageBoxW(hWnd, text, szTitle, MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+
+    sizePreset = preset;
+    RECT region = GetShareRegion(hWnd);
+    region.right = region.left + width;
+    region.bottom = region.top + height;
+    SetShareRegion(hWnd, region);
+
+    RECT window;
+    GetWindowRect(hWnd, &window);
+    if (!captionHidden && window.bottom > monitor.rcMonitor.bottom)
+    {
+        swprintf_s(text, L"The %d × %d shared area only fits this monitor (%d × %d) without the title bar.\n\nStart sharing, then choose \"Hide title bar\" from the system menu.",
+            width, height, monitorWidth, monitorHeight);
+        MessageBoxW(hWnd, text, szTitle, MB_OK | MB_ICONINFORMATION);
+    }
+    return true;
+}
+
+// Shows or hides the Title Bar, keeping the Share Region where it is.
+void ShowCaption(HWND hWnd, bool show)
+{
+    if (captionHidden == !show)
+        return;
+
+    RECT region = GetShareRegion(hWnd);
+    captionHidden = !show;
+    DWORD style = (DWORD) GetWindowLong(hWnd, GWL_STYLE) & WS_VISIBLE;
+    style |= captionHidden ? WINDOW_STYLE_NO_CAPTION : WINDOW_STYLE_CAPTION;
+    SetWindowLong(hWnd, GWL_STYLE, (LONG) style);
+    SetShareRegion(hWnd, region);
+}
+
+// Window title: "Portion of Screen 1920 x 1080", the current Share Region size.
+void UpdateTitle(HWND hWnd)
+{
+    RECT client;
+    GetClientRect(hWnd, &client);
+    WCHAR title[MAX_LOADSTRING + 32];
+    swprintf_s(title, L"%s %d × %d", szTitle, client.right, client.bottom);
+    SetWindowTextW(hWnd, title);
+}
+
+// Check mark on the active preset; the Size submenu is disabled in Focus Mode.
+void UpdateSystemMenu(HWND hWnd)
+{
+    HMENU hSysMenu = GetSystemMenu(hWnd, FALSE);
+    EnableMenuItem(hSysMenu, sizeMenuPosition, MF_BYPOSITION | (focusMode ? MF_GRAYED : MF_ENABLED));
+    CheckMenuRadioItem(hSizeMenu, IDC_SIZE_FIRST, IDC_SIZE_CUSTOM, IDC_SIZE_FIRST + sizePreset * IDC_SIZE_STEP, MF_BYCOMMAND);
 }
 
 // Message handler for about box.
@@ -338,6 +567,45 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     return (INT_PTR)FALSE;
 }
 
+// Message handler for the Custom Size dialog. On OK the values are stored in customWidth/Height.
+INT_PTR CALLBACK CustomSize(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        SetDlgItemInt(hDlg, IDC_CUSTOM_WIDTH, customWidth, FALSE);
+        SetDlgItemInt(hDlg, IDC_CUSTOM_HEIGHT, customHeight, FALSE);
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK)
+        {
+            BOOL widthOk, heightOk;
+            int width = (int) GetDlgItemInt(hDlg, IDC_CUSTOM_WIDTH, &widthOk, FALSE);
+            int height = (int) GetDlgItemInt(hDlg, IDC_CUSTOM_HEIGHT, &heightOk, FALSE);
+            if (!widthOk || !heightOk || width < POS_MIN_WIDTH || height < POS_MIN_HEIGHT || width > POS_MAX_SIZE || height > POS_MAX_SIZE)
+            {
+                WCHAR text[160];
+                swprintf_s(text, L"Enter a width of at least %d and a height of at least %d pixels.", POS_MIN_WIDTH, POS_MIN_HEIGHT);
+                MessageBoxW(hDlg, text, szTitle, MB_OK | MB_ICONINFORMATION);
+                return (INT_PTR)TRUE;
+            }
+            customWidth = width;
+            customHeight = height;
+            EndDialog(hDlg, IDOK);
+            return (INT_PTR)TRUE;
+        }
+        if (LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, IDCANCEL);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
 void LoadSettings()
 {
     try
@@ -349,6 +617,19 @@ void LoadSettings()
         defaultWindowPos.bottom = key.GetDwordValue(L"Bottom");
         winreg::RegExpected<DWORD> focusExpected = key.TryGetDwordValue(L"FocusMode");
         focusMode = focusExpected.IsValid() ? (bool) focusExpected.GetValue() : true;
+
+        winreg::RegExpected<DWORD> presetExpected = key.TryGetDwordValue(L"SizePreset");
+        if (presetExpected.IsValid() && presetExpected.GetValue() <= (DWORD) SIZE_CUSTOM)
+            sizePreset = (int) presetExpected.GetValue();
+        winreg::RegExpected<DWORD> widthExpected = key.TryGetDwordValue(L"CustomWidth");
+        winreg::RegExpected<DWORD> heightExpected = key.TryGetDwordValue(L"CustomHeight");
+        if (widthExpected.IsValid() && heightExpected.IsValid() &&
+            widthExpected.GetValue() >= POS_MIN_WIDTH && widthExpected.GetValue() <= POS_MAX_SIZE &&
+            heightExpected.GetValue() >= POS_MIN_HEIGHT && heightExpected.GetValue() <= POS_MAX_SIZE)
+        {
+            customWidth = (int) widthExpected.GetValue();
+            customHeight = (int) heightExpected.GetValue();
+        }
     }
     catch(...)
     {
@@ -368,4 +649,7 @@ void SaveSettings()
     key.SetDwordValue(L"Right", defaultWindowPos.right);
     key.SetDwordValue(L"Bottom", defaultWindowPos.bottom);
     key.SetDwordValue(L"FocusMode", (DWORD) focusMode);
+    key.SetDwordValue(L"SizePreset", (DWORD) sizePreset);
+    key.SetDwordValue(L"CustomWidth", (DWORD) customWidth);
+    key.SetDwordValue(L"CustomHeight", (DWORD) customHeight);
 }
