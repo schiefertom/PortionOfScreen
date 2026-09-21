@@ -72,6 +72,13 @@ $h = Launch
 Check "window found" ($h -ne [IntPtr]::Zero)
 Check "DPI context is PerMonitorV2" ([W]::AreDpiAwarenessContextsEqual([W]::GetWindowDpiAwarenessContext($h), [IntPtr](-4)))
 Check "title at start shows client size with U+00D7" ([W]::Title($h) -eq "Portion of Screen 784 $times 561")
+Check "tray helper window exists" ([W]::FindByPid($p.Id, 'PortionOfScreenTray') -ne [IntPtr]::Zero)
+
+# Single instance: a second start exits at once and leaves one process
+$second = Start-Process $exe -PassThru
+$second.WaitForExit(5000) | Out-Null
+Check "second start exits immediately" ($second.HasExited)
+Check "single instance: one process left" (@(Get-Process PortionOfScreen -ErrorAction SilentlyContinue).Count -eq 1)
 "start: title='$([W]::Title($h))' window=$(Win $h)"
 
 # 1920x1080 preset

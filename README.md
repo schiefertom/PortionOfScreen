@@ -9,7 +9,7 @@ This is a fork of [egonl/PortionOfScreen](https://github.com/egonl/PortionOfScre
 - In a Teams meeting, select **Share** > **Window** > **Portion of Screen**.
 
 ### Modes
-_Portion of Screen_ supports two modes, selected via the menu > **Options**. The menu opens with a **right-click anywhere in the window** (or on its title bar), via the icon in the title bar, or with Alt+Space. Activate the window first (taskbar, Alt+Tab); without focus it is invisible and clicks pass through it.
+_Portion of Screen_ supports two modes, selected via the menu > **Options**. The menu is available in three places: a **right-click on the tray icon** (always available), a **right-click anywhere in the window** while it has the focus, and the icon in its title bar (or Alt+Space). The window is invisible and click-through while it does not have the focus; **Show window** in the tray menu, a left-click on the tray icon, the taskbar button or Alt+Tab bring it back. Starting the program a second time only activates the running instance.
 - _Fixed Mode_: Only the area defined by the _Portion of Screen_ window will be shared. You can resize and move this window while presenting. Send the window to the background by left clicking it.
 - _Focus Mode_: When Focus Mode is enabled, the window that currently has the focus will automatically be shared. Use this mode if you're regularly switching between windows.
 
@@ -17,7 +17,7 @@ _Portion of Screen_ supports two modes, selected via the menu > **Options**. The
 - Menu > **Size** locks the shared area to 1280 x 720, 1600 x 900, 1920 x 1080, 1920 x 1200, 2560 x 1440 or a custom size. Sizes are physical pixels, also on scaled (125 %, 150 %) displays and mixed multi-monitor setups. Choosing a size in Focus Mode switches to Fixed Mode.
 - While a size is active the window can be moved but not resized. **Free** restores manual resizing.
 - The window title always shows the current size of the shared area, e.g. "Portion of Screen 1920 x 1080".
-- The title bar is transmitted as part of the window. Once sharing runs, choose menu > **Hide title bar** so that the shared window is exactly the chosen size. The title bar comes back whenever the window is activated (taskbar, Alt+Tab). Hide it only after you selected the window in Teams; windows without a title bar are not listed in the share picker.
+- The title bar is transmitted as part of the window. Once sharing runs, choose **Hide title bar** in the tray menu so that the shared window is exactly the chosen size. The title bar comes back whenever the window is activated (Show window, tray icon click, taskbar, Alt+Tab). Hide it only after you selected the window in Teams; windows without a title bar are not listed in the share picker.
 - A size that does not fit on the current monitor is refused with a message. The last size is remembered and applied on the next start.
 
 ### Notes

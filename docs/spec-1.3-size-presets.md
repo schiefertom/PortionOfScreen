@@ -21,7 +21,12 @@ smaller or scaled displays receive a standard resolution instead of a downscaled
 - Focus Mode: presets do not apply. Choosing a preset while in Focus Mode switches to Fixed Mode
   and applies it (the submenu is labelled "Size (leaves Focus Mode)"); a greyed submenu, the first
   design, turned out to be confusing in use.
-- Title bar: system menu entry "Hide title bar", meant to be used once sharing runs (Teams does not
+- Tray icon (hidden helper window owns it, so that showing its menu does not activate the main
+  Window): Show window, Size, Hide/Show title bar, Options, Exit. Left-click shows the window.
+  Added after first use: the invisible-without-focus window looked like the program had closed,
+  and every restart added another instance. Hence also single-instance: a second start only
+  activates the running Window.
+- Title bar: menu entry "Hide title bar" (toggle), meant to be used once sharing runs (Teams does not
   list WS_POPUP windows in its picker). The title bar returns whenever the Window is activated.
   Hiding and showing keeps the Share Region at the same screen position and size; the Window
   grows upwards when the title bar returns.

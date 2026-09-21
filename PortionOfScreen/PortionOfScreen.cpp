@@ -6,6 +6,7 @@
 #include "PortionOfScreen.h"
 #include "WinReg.hpp"
 #include <windowsx.h>
+#include <shellapi.h>
 #include <cstdio>
 
 #define MAX_LOADSTRING 100
@@ -13,11 +14,15 @@
 #define POS_MIN_WIDTH  320
 #define POS_MIN_HEIGHT 200
 #define POS_MAX_SIZE   16384
+#define WM_TRAYICON    (WM_APP + 1)
+#define TRAY_ICON_ID   1
 
-// System menu command IDs. The four low-order bits of a WM_SYSCOMMAND wParam are used by the
-// system, so application IDs keep them zero and the handler masks wParam with 0xFFF0.
+// Menu command IDs, sent as WM_SYSCOMMAND to the main window from the system menu, the
+// right-click menu and the tray menu. The four low-order bits of a WM_SYSCOMMAND wParam are
+// used by the system, so application IDs keep them zero and the handler masks wParam with 0xFFF0.
 #define IDC_OPTIONS       0x1000
-#define IDC_HIDE_CAPTION  0x1010
+#define IDC_HIDE_CAPTION  0x1010   // toggles the Title Bar
+#define IDC_SHOW_WINDOW   0x1020   // tray menu: activate the Window (makes it visible again)
 #define IDC_SIZE_FIRST    0x1100   // Free; preset n is IDC_SIZE_FIRST + n * IDC_SIZE_STEP
 #define IDC_SIZE_STEP     0x10
 
@@ -46,9 +51,15 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 bool moveToDefaultWindowPos = false;
 HWND newFocusHwnd;
 unsigned int focusTime;
+HWND hMainWnd;                                  // the Window (Share Region plus frame)
 HMENU hSizeMenu;                                // "Size" submenu of the system menu
 int sizeMenuPosition;                           // its position in the system menu
-bool captionHidden = false;                     // Title Bar hidden via the system menu
+bool captionHidden = false;                     // Title Bar hidden via the menu
+HWND hTrayWnd;                                  // hidden helper window that owns the tray icon
+HMENU hTrayMenu;                                // tray icon menu
+HMENU hTraySizeMenu;                            // its "Size" submenu
+UINT taskbarCreatedMessage;                     // Explorer restarted: re-add the tray icon
+bool trayIconAdded = false;
 
 // Global settings
 bool focusMode =  false;
@@ -72,6 +83,14 @@ bool                ApplySizePreset(HWND hWnd, int preset);
 void                ShowCaption(HWND hWnd, bool show);
 void                UpdateTitle(HWND hWnd);
 void                UpdateSystemMenu(HWND hWnd);
+HMENU               CreateSizeMenu();
+void                UpdateSizeMenu(HMENU hMenu);
+LRESULT CALLBACK    TrayWndProc(HWND, UINT, WPARAM, LPARAM);
+bool                CreateTrayWindow(HINSTANCE hInstance);
+void                AddTrayIcon();
+void                UpdateTrayIcon();
+void                ShowTrayMenu();
+void                ShowMainWindow();
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -87,6 +106,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_PORTIONOFSCREEN, szWindowClass, MAX_LOADSTRING);
+
+    // Single instance: a second start only brings the running Window to the front. Without
+    // this, every start adds another Window that is invisible while it has no focus.
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"PortionOfScreen.SingleInstance");
+    if (hMutex && GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        HWND hExisting = FindWindowW(szWindowClass, nullptr);
+        if (hExisting)
+            SetForegroundWindow(hExisting);
+        return 0;
+    }
+
     MyRegisterClass(hInstance);
 
     // Perform application initialization:
@@ -173,12 +204,9 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    {
       return FALSE;
    }
+   hMainWnd = hWnd;
 
-   hSizeMenu = CreatePopupMenu();
-   AppendMenu(hSizeMenu, MF_STRING, IDC_SIZE_FIRST, L"Free");
-   for (int i = 0; i < SIZE_PRESET_COUNT; ++i)
-       AppendMenu(hSizeMenu, MF_STRING, IDC_SIZE_FIRST + (i + 1) * IDC_SIZE_STEP, SIZE_PRESETS[i].label);
-   AppendMenu(hSizeMenu, MF_STRING, IDC_SIZE_CUSTOM, L"Custom...");
+   hSizeMenu = CreateSizeMenu();
 
    HMENU hSysMenu = GetSystemMenu(hWnd, FALSE);
    AppendMenu(hSysMenu, MF_SEPARATOR, 0, NULL);
@@ -190,6 +218,8 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    ShowWindow(hWnd, nCmdShow);
    SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), 128, LWA_ALPHA);
    UpdateWindow(hWnd);
+
+   CreateTrayWindow(hInstance);
 
    if (!focusMode)
        ApplySizePreset(hWnd, startupPreset);   // stays Free, with a message, if it does not fit
@@ -386,6 +416,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         SaveSettings();
+        if (trayIconAdded)
+        {
+            NOTIFYICONDATAW nid = { sizeof(nid) };
+            nid.hWnd = hTrayWnd;
+            nid.uID = TRAY_ICON_ID;
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
         PostQuitMessage(0);
         break;
 
@@ -399,7 +436,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         if (command == IDC_HIDE_CAPTION)
         {
-            ShowCaption(hWnd, false);
+            ShowCaption(hWnd, captionHidden);   // toggle
+            break;
+        }
+        if (command == IDC_SHOW_WINDOW)
+        {
+            ShowMainWindow();
             break;
         }
         if (focusMode && command > IDC_SIZE_FIRST && command <= IDC_SIZE_CUSTOM)
@@ -551,20 +593,149 @@ void UpdateTitle(HWND hWnd)
     WCHAR title[MAX_LOADSTRING + 32];
     swprintf_s(title, L"%s %d × %d", szTitle, client.right, client.bottom);
     SetWindowTextW(hWnd, title);
+    UpdateTrayIcon();
 }
 
-// Check mark on the active preset. In Focus Mode no preset is active and the submenu says so.
+// The "Size" submenu: Free, the presets, Custom. One instance per parent menu.
+HMENU CreateSizeMenu()
+{
+    HMENU hMenu = CreatePopupMenu();
+    AppendMenu(hMenu, MF_STRING, IDC_SIZE_FIRST, L"Free");
+    for (int i = 0; i < SIZE_PRESET_COUNT; ++i)
+        AppendMenu(hMenu, MF_STRING, IDC_SIZE_FIRST + (i + 1) * IDC_SIZE_STEP, SIZE_PRESETS[i].label);
+    AppendMenu(hMenu, MF_STRING, IDC_SIZE_CUSTOM, L"Custom...");
+    return hMenu;
+}
+
+// Check mark on the active preset. In Focus Mode no preset is active.
+void UpdateSizeMenu(HMENU hMenu)
+{
+    if (focusMode)
+    {
+        for (UINT id = IDC_SIZE_FIRST; id <= IDC_SIZE_CUSTOM; id += IDC_SIZE_STEP)
+            CheckMenuItem(hMenu, id, MF_BYCOMMAND | MF_UNCHECKED);
+    }
+    else
+        CheckMenuRadioItem(hMenu, IDC_SIZE_FIRST, IDC_SIZE_CUSTOM, IDC_SIZE_FIRST + sizePreset * IDC_SIZE_STEP, MF_BYCOMMAND);
+}
+
+// Labels and check marks of the system menu before it is shown.
 void UpdateSystemMenu(HWND hWnd)
 {
     HMENU hSysMenu = GetSystemMenu(hWnd, FALSE);
     ModifyMenu(hSysMenu, sizeMenuPosition, MF_BYPOSITION | MF_POPUP, (UINT_PTR) hSizeMenu, focusMode ? L"Size (leaves Focus Mode)" : L"Size");
-    if (focusMode)
+    ModifyMenu(hSysMenu, IDC_HIDE_CAPTION, MF_BYCOMMAND | MF_STRING, IDC_HIDE_CAPTION, captionHidden ? L"Show title bar" : L"Hide title bar");
+    UpdateSizeMenu(hSizeMenu);
+}
+
+// ---- Tray icon -------------------------------------------------------------------------------
+// The tray icon belongs to a hidden helper window, not to the main Window: showing a tray menu
+// requires making its owner the foreground window, and activating the main Window would make it
+// visible and bring the Title Bar back, which is exactly what the tray menu must not do.
+
+bool CreateTrayWindow(HINSTANCE hInstance)
+{
+    WNDCLASSEXW wcex = { sizeof(wcex) };
+    wcex.lpfnWndProc = TrayWndProc;
+    wcex.hInstance = hInstance;
+    wcex.lpszClassName = L"PortionOfScreenTray";
+    RegisterClassExW(&wcex);
+
+    // A zero-size tool window: never in the taskbar or Alt+Tab, but it can be made foreground.
+    hTrayWnd = CreateWindowExW(WS_EX_TOOLWINDOW, wcex.lpszClassName, szTitle, WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
+    if (!hTrayWnd)
+        return false;
+    ShowWindow(hTrayWnd, SW_SHOWNOACTIVATE);
+
+    hTraySizeMenu = CreateSizeMenu();
+    hTrayMenu = CreatePopupMenu();
+    AppendMenu(hTrayMenu, MF_STRING, IDC_SHOW_WINDOW, L"Show window");
+    AppendMenu(hTrayMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hTrayMenu, MF_POPUP, (UINT_PTR) hTraySizeMenu, L"Size");
+    AppendMenu(hTrayMenu, MF_STRING, IDC_HIDE_CAPTION, L"Hide title bar");
+    AppendMenu(hTrayMenu, MF_STRING, IDC_OPTIONS, L"Options");
+    AppendMenu(hTrayMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hTrayMenu, MF_STRING, SC_CLOSE, L"Exit");
+    SetMenuDefaultItem(hTrayMenu, IDC_SHOW_WINDOW, FALSE);
+
+    taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
+    AddTrayIcon();
+    return true;
+}
+
+void AddTrayIcon()
+{
+    NOTIFYICONDATAW nid = { sizeof(nid) };
+    nid.hWnd = hTrayWnd;
+    nid.uID = TRAY_ICON_ID;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    UINT dpi = GetDpiForWindow(hTrayWnd);
+    nid.hIcon = (HICON) LoadImageW(hInst, MAKEINTRESOURCE(IDI_PORTIONOFSCREEN), IMAGE_ICON, GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR);
+    GetWindowTextW(hMainWnd, nid.szTip, ARRAYSIZE(nid.szTip));
+    trayIconAdded = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+}
+
+// Tooltip of the tray icon follows the window title (current Share Region size).
+void UpdateTrayIcon()
+{
+    if (!trayIconAdded)
+        return;
+    NOTIFYICONDATAW nid = { sizeof(nid) };
+    nid.hWnd = hTrayWnd;
+    nid.uID = TRAY_ICON_ID;
+    nid.uFlags = NIF_TIP;
+    GetWindowTextW(hMainWnd, nid.szTip, ARRAYSIZE(nid.szTip));
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+void ShowTrayMenu()
+{
+    ModifyMenu(hTrayMenu, 2, MF_BYPOSITION | MF_POPUP, (UINT_PTR) hTraySizeMenu, focusMode ? L"Size (leaves Focus Mode)" : L"Size");
+    ModifyMenu(hTrayMenu, IDC_HIDE_CAPTION, MF_BYCOMMAND | MF_STRING, IDC_HIDE_CAPTION, captionHidden ? L"Show title bar" : L"Hide title bar");
+    UpdateSizeMenu(hTraySizeMenu);
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(hTrayWnd);      // required, otherwise the menu does not close on a click elsewhere
+    UINT command = TrackPopupMenu(hTrayMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hTrayWnd, nullptr);
+    PostMessage(hTrayWnd, WM_NULL, 0, 0);
+    if (command)
+        SendMessage(hMainWnd, WM_SYSCOMMAND, command, 0);
+}
+
+// Activates the Window: it becomes visible, topmost and gets its Title Bar back.
+void ShowMainWindow()
+{
+    SetWindowPos(hMainWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetForegroundWindow(hMainWnd);
+}
+
+LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == taskbarCreatedMessage)
     {
-        for (UINT id = IDC_SIZE_FIRST; id <= IDC_SIZE_CUSTOM; id += IDC_SIZE_STEP)
-            CheckMenuItem(hSizeMenu, id, MF_BYCOMMAND | MF_UNCHECKED);
+        AddTrayIcon();
+        return 0;
     }
-    else
-        CheckMenuRadioItem(hSizeMenu, IDC_SIZE_FIRST, IDC_SIZE_CUSTOM, IDC_SIZE_FIRST + sizePreset * IDC_SIZE_STEP, MF_BYCOMMAND);
+
+    switch (message)
+    {
+    case WM_TRAYICON:
+        switch (LOWORD(lParam))
+        {
+        case WM_LBUTTONUP:
+        case WM_LBUTTONDBLCLK:
+            ShowMainWindow();
+            break;
+        case WM_RBUTTONUP:
+        case WM_CONTEXTMENU:
+            ShowTrayMenu();
+            break;
+        }
+        return 0;
+    }
+    return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
 // Message handler for about box.
