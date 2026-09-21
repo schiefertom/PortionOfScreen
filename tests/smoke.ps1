@@ -141,14 +141,17 @@ Check "oversized saved custom size: not locked" ((Win $h) -like '640x480 @*')
 CloseAndWait $h
 Check "after fallback SizePreset saved as Free" ((Get-ItemProperty $regPath).SizePreset -eq 0)
 
-# Focus Mode: size commands are ignored
+# Focus Mode: choosing a preset leaves Focus Mode and applies it; choosing Free does nothing
 Set-ItemProperty $regPath FocusMode 1 -Type DWord
 Set-ItemProperty $regPath SizePreset 3 -Type DWord
 $h = Launch
+[W]::SendMessage($h, $WM_SYSCOMMAND, [IntPtr]0x1100, [IntPtr]0) | Out-Null; Start-Sleep -Milliseconds 300
+Check "focus mode: Free keeps Focus Mode (client not locked to a preset)" ((Client $h) -ne '1920x1080')
 [W]::SendMessage($h, $WM_SYSCOMMAND, [IntPtr]0x1140, [IntPtr]0) | Out-Null; Start-Sleep -Milliseconds 300
-Check "focus mode: preset command ignored" ((Client $h) -ne '1920x1200')
+Check "focus mode: preset switches to Fixed Mode and applies 1920x1200" ((Client $h) -eq '1920x1200')
 CloseAndWait $h
-Check "focus mode: saved preset kept (3)" ((Get-ItemProperty $regPath).SizePreset -eq 3)
+Check "focus mode: FocusMode saved as 0 after choosing a preset" ((Get-ItemProperty $regPath).FocusMode -eq 0)
+Check "focus mode: preset 4 saved" ((Get-ItemProperty $regPath).SizePreset -eq 4)
 
 # Restore the user's settings
 Remove-Item $regPath -Recurse -Force

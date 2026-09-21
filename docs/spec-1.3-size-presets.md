@@ -11,13 +11,16 @@ smaller or scaled displays receive a standard resolution instead of a downscaled
 
 - Presets: Free, 1280x720, 1600x900, 1920x1080, 1920x1200, 2560x1440, Custom.
 - Selection: system menu submenu "Size" with a check mark on the active entry. "Custom..." opens a
-  dialog with Width, Height, OK, Cancel.
+  dialog with Width, Height, OK, Cancel. The system menu also opens on right-click anywhere in the
+  Window, so the whole Share Region is the click target (the title bar icon is 16 px on a 5K display).
 - Locked: while a preset is active the Window can be moved but not resized (min = max track size).
   Free restores the upstream behaviour and is the default on first start.
 - Applying a preset keeps the top-left corner; if the Window would extend past the monitor it is
   pushed inwards. A preset that does not fit the monitor including the frame is refused with a
   message box, never clamped.
-- Focus Mode: the Size submenu is disabled (greyed) while Focus Mode is active.
+- Focus Mode: presets do not apply. Choosing a preset while in Focus Mode switches to Fixed Mode
+  and applies it (the submenu is labelled "Size (leaves Focus Mode)"); a greyed submenu, the first
+  design, turned out to be confusing in use.
 - Title bar: system menu entry "Hide title bar", meant to be used once sharing runs (Teams does not
   list WS_POPUP windows in its picker). The title bar returns whenever the Window is activated.
   Hiding and showing keeps the Share Region at the same screen position and size; the Window

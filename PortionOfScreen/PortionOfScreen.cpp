@@ -5,6 +5,7 @@
 #include "framework.h"
 #include "PortionOfScreen.h"
 #include "WinReg.hpp"
+#include <windowsx.h>
 #include <cstdio>
 
 #define MAX_LOADSTRING 100
@@ -271,6 +272,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         UpdateSystemMenu(hWnd);
         return DefWindowProc(hWnd, message, wParam, lParam);
 
+    case WM_CONTEXTMENU:
+    {
+        // Right-click anywhere in the Window (or the menu key) opens the system menu, so that
+        // the whole Share Region is a click target and not only the small title bar icon.
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (lParam == -1)
+        {
+            RECT region = GetShareRegion(hWnd);
+            pt.x = (region.left + region.right) / 2;
+            pt.y = (region.top + region.bottom) / 2;
+        }
+        UINT command = TrackPopupMenu(GetSystemMenu(hWnd, FALSE), TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
+        if (command)
+            SendMessage(hWnd, WM_SYSCOMMAND, command, MAKELPARAM(pt.x, pt.y));
+        return 0;
+    }
+
     case WM_TIMER:
         switch (wParam)
         {
@@ -384,8 +402,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             ShowCaption(hWnd, false);
             break;
         }
-        if (focusMode && command >= IDC_SIZE_FIRST && command <= IDC_SIZE_CUSTOM)
-            break;                              // presets do not apply in Focus Mode (menu is greyed)
+        if (focusMode && command > IDC_SIZE_FIRST && command <= IDC_SIZE_CUSTOM)
+        {
+            // Presets only exist in Fixed Mode: choosing one leaves Focus Mode, like Options does,
+            // and puts the Window back where the user last placed it.
+            focusMode = false;
+            SetWindowPos(hWnd, HWND_TOPMOST, defaultWindowPos.left, defaultWindowPos.top, defaultWindowPos.right - defaultWindowPos.left, defaultWindowPos.bottom - defaultWindowPos.top, 0);
+        }
         if (command == IDC_SIZE_CUSTOM)
         {
             int prevWidth = customWidth, prevHeight = customHeight;
@@ -530,12 +553,18 @@ void UpdateTitle(HWND hWnd)
     SetWindowTextW(hWnd, title);
 }
 
-// Check mark on the active preset; the Size submenu is disabled in Focus Mode.
+// Check mark on the active preset. In Focus Mode no preset is active and the submenu says so.
 void UpdateSystemMenu(HWND hWnd)
 {
     HMENU hSysMenu = GetSystemMenu(hWnd, FALSE);
-    EnableMenuItem(hSysMenu, sizeMenuPosition, MF_BYPOSITION | (focusMode ? MF_GRAYED : MF_ENABLED));
-    CheckMenuRadioItem(hSizeMenu, IDC_SIZE_FIRST, IDC_SIZE_CUSTOM, IDC_SIZE_FIRST + sizePreset * IDC_SIZE_STEP, MF_BYCOMMAND);
+    ModifyMenu(hSysMenu, sizeMenuPosition, MF_BYPOSITION | MF_POPUP, (UINT_PTR) hSizeMenu, focusMode ? L"Size (leaves Focus Mode)" : L"Size");
+    if (focusMode)
+    {
+        for (UINT id = IDC_SIZE_FIRST; id <= IDC_SIZE_CUSTOM; id += IDC_SIZE_STEP)
+            CheckMenuItem(hSizeMenu, id, MF_BYCOMMAND | MF_UNCHECKED);
+    }
+    else
+        CheckMenuRadioItem(hSizeMenu, IDC_SIZE_FIRST, IDC_SIZE_CUSTOM, IDC_SIZE_FIRST + sizePreset * IDC_SIZE_STEP, MF_BYCOMMAND);
 }
 
 // Message handler for about box.
