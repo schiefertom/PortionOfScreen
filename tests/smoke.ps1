@@ -4,7 +4,7 @@
 # scaling, saves and restores the user's settings in HKCU\SOFTWARE\PortionOfScreen.
 # Expected: every line PASS. Run it again after changing the display scaling (125 %, 150 %).
 $ErrorActionPreference = 'Stop'
-$exe = 'C:\Repo\PortionOfScreen\x64\Release\PortionOfScreen.exe'
+$exe = Join-Path $PSScriptRoot '..\x64\Release\PortionOfScreen.exe'
 $regPath = 'HKCU:\SOFTWARE\PortionOfScreen'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
