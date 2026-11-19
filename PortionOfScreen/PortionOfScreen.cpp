@@ -5,6 +5,7 @@
 #include "framework.h"
 #include "PortionOfScreen.h"
 #include "WinReg.hpp"
+#include "DesktopDuplication.h"
 #include <windowsx.h>
 #include <shellapi.h>
 #include <cstdio>
@@ -60,6 +61,8 @@ HMENU hTrayMenu;                                // tray icon menu
 HMENU hTraySizeMenu;                            // its "Size" submenu
 UINT taskbarCreatedMessage;                     // Explorer restarted: re-add the tray icon
 bool trayIconAdded = false;
+DesktopDuplication desktopDuplication;          // image of the desktop beneath the Share Region
+ULONGLONG focusLostAt = 0;                      // GetTickCount64() when the Window last lost the focus
 
 // Global settings
 bool focusMode =  false;
@@ -91,6 +94,7 @@ void                AddTrayIcon();
 void                UpdateTrayIcon();
 void                ShowTrayMenu();
 void                ShowMainWindow();
+bool                UseDuplication(HWND hWnd);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -269,6 +273,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         return DefWindowProc(hWnd, message, wParam, lParam);
 
     case WM_KILLFOCUS:
+        focusLostAt = GetTickCount64();
         SetLayeredWindowAttributes(hWnd, RGB(255, 255, 255), 0, LWA_ALPHA);
         SetWindowLong(hWnd, GWL_EXSTYLE, WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT);
         return DefWindowProc(hWnd, message, wParam, lParam);
@@ -357,7 +362,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 }
             }
 
-            InvalidateRect(hWnd, NULL, TRUE);
+            // Only the parts whose pixels changed are repainted, see DesktopDuplication.h.
+            if (!UseDuplication(hWnd))
+                InvalidateRect(hWnd, NULL, TRUE);
+            else
+            {
+                RECT region = GetShareRegion(hWnd);
+                HRGN changed = desktopDuplication.Update(region);
+                if (changed)
+                    InvalidateRgn(hWnd, changed, FALSE);
+                else if (!desktopDuplication.Covers(region))
+                    InvalidateRect(hWnd, NULL, TRUE);   // duplication unavailable: BitBlt
+            }
         }
         break;
 
@@ -368,6 +384,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
+
+        if (UseDuplication(hWnd) && desktopDuplication.Covers(GetShareRegion(hWnd)))
+        {
+            desktopDuplication.Draw(hdc);
+            EndPaint(hWnd, &ps);
+            break;
+        }
+
+        // Fallback: read the screen. See DesktopDuplication.h for why this is not the default.
         RECT rect;
         GetClientRect(hWnd, &rect);
 
@@ -477,6 +502,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
 
     return 0;
+}
+
+// While the Window has the focus it is visible (half transparent) and would show up in a
+// duplicated frame, also for a moment after it lost the focus, until DWM has composed it
+// transparent. Then the screen is read with BitBlt, which skips layered windows. That is
+// expensive for DWM, but only lasts while the user positions the Window.
+bool UseDuplication(HWND hWnd)
+{
+    return GetForegroundWindow() != hWnd && GetTickCount64() - focusLostAt > 500;
 }
 
 // Width and height of a preset; false for Free.

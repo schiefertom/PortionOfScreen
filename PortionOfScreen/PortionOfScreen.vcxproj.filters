@@ -15,6 +15,9 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="DesktopDuplication.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="framework.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -32,6 +35,9 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="DesktopDuplication.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="PortionOfScreen.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

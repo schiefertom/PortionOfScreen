@@ -135,6 +135,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="DesktopDuplication.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="PortionOfScreen.h" />
     <ClInclude Include="Resource.h" />
@@ -142,6 +143,7 @@
     <ClInclude Include="WinReg.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="DesktopDuplication.cpp" />
     <ClCompile Include="PortionOfScreen.cpp" />
   </ItemGroup>
   <ItemGroup>
